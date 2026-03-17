@@ -11,6 +11,10 @@ dependencies = [
     "mlflow",
     "psycopg[binary]",
     "sqlalchemy",
+    "ipykernel",
+    "jupyter",
+    "notebook",
+    "finmind",
     "pandas",
     "numpy",
 ]
