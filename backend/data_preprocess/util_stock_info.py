@@ -4,6 +4,7 @@ from datetime import datetime
 import time
 import os
 from dotenv import load_dotenv
+import pandas as pd
 load_dotenv()
 
 ACCOUNT = os.getenv('STOCK_ACCOUNT_USERNAME')
@@ -30,7 +31,46 @@ def Get_Stock_Informations(stock_code, start_date, stop_date):
         return result['data']
     return dict([])
 
+def convert_roc_to_ad(date_str):
+    try:
+        roc_year, month, day = map(int, date_str.split('/'))
+        ad_year = roc_year + 1911
+        return f"{ad_year}/{month:02d}/{day:02d}"
+    except Exception as e:
+        print(f"Error converting date: {e}")
+        return date_str
+    
+def Get_Stock_Daily_Information(stock_code, date):
+    # Fetch daily info
+    information_url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={date}&stockNo={stock_code}&response=json")
+    try:
+        response = requests.get(information_url)
+        time.sleep(3) # Add delay to avoid rate limiting
+        result = response.json()
+    except Exception as e:
+        print(f"Error fetching data for {stock_code} on {date}: {e}")
+        print(f"Response content: {response.content}")
+        return pd.DataFrame()
+    
+    if result.get('stat') != 'OK' or 'data' not in result:
+        return pd.DataFrame()
 
+    df = pd.DataFrame(result['data'], columns=result['fields'])
+
+    # Process data
+    df['股票代號'] = stock_code
+    df['日期'] = df['日期'].apply(convert_roc_to_ad)
+    df['日期'] = pd.to_datetime(df['日期'], format='%Y/%m/%d').dt.date
+    int_cols = ['成交股數', '成交金額', '開盤價', '最高價', '最低價', '收盤價', '漲跌價差', '成交筆數']
+    
+    # Preprocess numeric columns to remove commas and handle non-numeric values
+    df[int_cols] = df[int_cols].replace({',': ''}, regex=True)
+    df[int_cols] = df[int_cols].apply(pd.to_numeric, errors='coerce')
+
+    if(result['stat'] == 'OK'):
+        # print(df.head(2))
+        return df
+    return pd.DataFrame()
 # 取得持有股票
 # Input:
 #   account: 使用者帳號
