@@ -27,7 +27,7 @@ def Get_Stock_Informations(stock_code, start_date, stop_date):
                        )
     result = requests.get(information_url).json()
     if(result['result'] == 'success'):
-        print(result['data'])
+        # print(result['data'])
         return result['data']
     return dict([])
 

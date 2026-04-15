@@ -1,3 +1,6 @@
 .env
 backend/mlflow.db
+backend/logs
 backend/data
+backend/trade/stock_api/__pycache__
+mlflow

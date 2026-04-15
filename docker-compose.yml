@@ -17,7 +17,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest # 或你自製的 image
+    container_name: ats-mlflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # 關鍵：讓 MLflow 連接到同網路的 postgres 服務名稱
+      - BACKEND_STORE_URI=postgresql://${POSTGRES_USER:-ats_user}:${POSTGRES_PASSWORD:-ats_password}@postgres:5432/${POSTGRES_DB:-mlflow_db}
+      - MLFLOW_HTTP_REQUEST_ALLOW_HOSTS=any
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 注意：啟動指令必須包含 backend-store-uri
+    command: >
+      mlflow server 
+      --backend-store-uri postgresql://${POSTGRES_USER:-ats_user}:${POSTGRES_PASSWORD:-ats_password}@postgres:5432/${POSTGRES_DB:-mlflow_db}
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+    volumes:
+      - ./mlflow:/mlflow/artifacts
   backend:
     build:
       context: .
@@ -49,6 +69,8 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_AUTH_SOURCE: "'internal'"
+      PGADMIN_CONFIG_LOGIN_BANNER: "''"
     ports:
       - "5050:80"
     depends_on:
