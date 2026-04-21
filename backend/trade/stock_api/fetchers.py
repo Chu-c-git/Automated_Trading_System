@@ -1,5 +1,6 @@
 import time
 import pandas as pd
+from tqdm import tqdm
 
 from .utils import month_starts, roc_to_ad, safe_get_json, clean_numeric
 
@@ -8,7 +9,7 @@ def get_twse_stock_data(stock_code: str, start_date: str, end_date: str) -> pd.D
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     all_df = []
 
-    for month_start in month_starts(start_date, end_date):
+    for month_start in tqdm(month_starts(start_date, end_date), desc="Fetching TWSE data", total=len(list(month_starts(start_date, end_date)))):
         params = {
             "response": "json",
             "date": pd.Timestamp(month_start).strftime("%Y%m%d"),

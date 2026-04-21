@@ -32,9 +32,10 @@ Predict target:
 - Buy rule:
 
 - Sell rule:
+    If the net profit 
 
 - Schedule: 
-
+Every day after the market close, start fetching latest data, train model and make prediction table of tomorrow. The prediction table contains the high and low. If the prediction shows the stock will rise 
 
 </details>
 
