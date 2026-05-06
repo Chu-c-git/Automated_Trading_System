@@ -36,7 +36,7 @@ ACCOUNT = os.getenv('STOCK_ACCOUNT_USERNAME')
 PASSWORD = os.getenv('STOCK_ACCOUNT_PASSWORD')
 PG_URI = os.getenv('POSTGRES_URI')
 ENGINE = sqlalchemy.create_engine(PG_URI)
-STOCK_SHARE = 1
+STOCK_SHARE = 10
 
 # Check predictions table
 def check_pred_table():
