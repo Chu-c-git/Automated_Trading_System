@@ -2,23 +2,25 @@
 Multi-stock LSTM for next-day return forecasting.
 
 Public API:
-  - LSTMModel          : nn.Module definition
-  - train_lstm         : train + MLflow logging, returns (model, run)
-  - evaluate_metrics   : one-step RMSE / R² over a DataLoader
-  - recursive_forecast : autoregressive n-step price forecast
+  - LSTMModel                       : nn.Module definition
+  - train_lstm                      : train + MLflow logging
+  - evaluate_metrics                : one-step RMSE / R² over a DataLoader
+  - recursive_forecast              : autoregressive n-step price forecast
   - evaluate_autoregressive_metrics : rolling-window backtest
+  - save_forecast_to_db             : run 1-day forecast and persist to PostgreSQL
 """
 
 import copy
 import time
 
-import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import r2_score
+from sqlalchemy import create_engine
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -44,8 +46,8 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
                hidden_size=64, num_layers=3, dropout=0.3,
                lr=0.001, batch_size=32, num_epochs=100, eval_every=5):
     """
-    Returns (best_model, mlflow_run).
-    X_train / y_train are already-scaled numpy arrays.
+    Returns (best_model, mlflow_run, train_loader, test_loader, device).
+    X_train / y_train are already-scaled numpy arrays of shape (samples, seq_len, features).
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -64,7 +66,6 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     best_rmse, best_state = float('inf'), None
-    train_rmse_hist, rmse_epochs = [], []
 
     with mlflow.start_run(nested=True) as run:
         mlflow.log_params(params)
@@ -83,8 +84,6 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
             if (epoch + 1) % eval_every == 0:
                 rmse, _ = evaluate_metrics(model, train_loader, y_scaler, device)
                 avg_ret_rmse = float(rmse.mean())
-                train_rmse_hist.append(avg_ret_rmse)
-                rmse_epochs.append(epoch + 1)
 
                 metrics = {'train_mse_scaled': avg_loss, 'train_rmse_ret_avg': avg_ret_rmse}
                 for i, code in enumerate(stock_codes):
@@ -123,8 +122,9 @@ def evaluate_metrics(model, data_loader, y_scaler, device):
     return rmse, r2
 
 
-def evaluate_autoregressive_metrics(model, X_test_np, y_test_np, y_scaler,
-                                    n_steps, stock_codes, df_test_closes, device):
+def evaluate_autoregressive_metrics(model, X_test_np, y_test_np, x_scaler, y_scaler,
+                                    n_steps, stock_codes, df_test_closes,
+                                    feature_cols, device):
     """Rolling-window backtest over the test set."""
     n_stocks  = y_scaler.n_features_in_
     seq_len   = X_test_np.shape[1]
@@ -135,8 +135,10 @@ def evaluate_autoregressive_metrics(model, X_test_np, y_test_np, y_scaler,
     all_preds, all_trues = [], []
     for i in range(n_windows):
         last_close = df_test_closes.iloc[i + seq_len - 1].values
-        rets, _    = recursive_forecast(model, X_test_np[i], n_steps,
-                                        y_scaler, last_close, device)
+        rets, _ = recursive_forecast(
+            model, X_test_np[i], n_steps,
+            x_scaler, y_scaler, last_close, feature_cols, device,
+        )
         all_preds.append(rets)
         all_trues.append(y_scaler.inverse_transform(y_test_np[i:i + n_steps]))
 
@@ -158,28 +160,76 @@ def evaluate_autoregressive_metrics(model, X_test_np, y_test_np, y_scaler,
 
 # ── Forecasting ──────────────────────────────────────────────────────────────
 
-def recursive_forecast(model, seed_X_scaled, n_steps, y_scaler, last_close, device):
+def recursive_forecast(model, seed_X_scaled, n_steps, x_scaler, y_scaler,
+                       last_close, feature_cols, device):
     """
     Autoregressively predict n_steps days of returns, then convert to prices.
-    Feature layout: cols [0..n_stocks-1]=close, [n_stocks..2*n_stocks-1]=ret
-    """
-    n_stocks      = y_scaler.n_features_in_
-    ret_col_start = n_stocks
-    model.eval()
-    window = seed_X_scaled.copy()
-    cur_close_scaled = window[-1, :n_stocks].copy()
-    forecasts = []
 
+    Only close_* and ret_* columns are updated each step; all other columns
+    (open, high, low, capacity, turnover, transaction_volume, change, market,
+    rel) stay frozen at their last known value — they cannot be derived from
+    the predicted return alone.
+    """
+    model.eval()
+    window        = seed_X_scaled.copy()
+    current_close = last_close.copy().astype(float)
+
+    close_idx = [feature_cols.index(c) for c in feature_cols if c.startswith('close_')]
+    ret_idx   = [feature_cols.index(c) for c in feature_cols if c.startswith('ret_')]
+
+    x_mean_close  = x_scaler.mean_[close_idx]
+    x_scale_close = x_scaler.scale_[close_idx]
+
+    forecasts = []
     with torch.no_grad():
         for _ in range(n_steps):
-            x = torch.tensor(window, dtype=torch.float32).unsqueeze(0).to(device)
-            pred = model(x).cpu().numpy()[0]
-            forecasts.append(pred)
+            x           = torch.tensor(window, dtype=torch.float32).unsqueeze(0).to(device)
+            pred_scaled = model(x).cpu().numpy()[0]
+            forecasts.append(pred_scaled)
+
+            actual_ret    = y_scaler.inverse_transform(pred_scaled.reshape(1, -1))[0]
+            current_close = current_close * (1 + actual_ret)
+
             window = np.roll(window, -1, axis=0)
-            window[-1, ret_col_start:ret_col_start + n_stocks] = pred
-            cur_close_scaled = np.clip(cur_close_scaled * (1 + pred), 0, 1)
-            window[-1, :n_stocks] = cur_close_scaled
+            window[-1, close_idx] = (current_close - x_mean_close) / x_scale_close
+            window[-1, ret_idx]   = pred_scaled
 
     rets   = y_scaler.inverse_transform(np.array(forecasts))
     prices = np.cumprod(1 + rets, axis=0) * last_close
     return rets, prices
+
+
+# ── DB persistence ───────────────────────────────────────────────────────────
+
+def save_forecast_to_db(model, X_test_np, df_test, close_wide,
+                        x_scaler, y_scaler, feature_cols, stock_codes,
+                        postgres_uri: str, device,
+                        table_name: str = 'lstm_prediction'):
+    """
+    Run a 1-day forecast from the last test window and write to PostgreSQL.
+
+    Returns the forecast_df that was saved.
+    """
+    seed       = X_test_np[-1]
+    last_close = df_test[close_wide.columns].iloc[-1].values
+
+    forecast_rets, forecast_prices = recursive_forecast(
+        model, seed, n_steps=1,
+        x_scaler=x_scaler, y_scaler=y_scaler,
+        last_close=last_close, feature_cols=feature_cols, device=device,
+    )
+
+    future_dates = pd.date_range(start=close_wide.index[-1], periods=2)[1:]
+    forecast_df  = pd.DataFrame(
+        forecast_prices,
+        index   = future_dates,
+        columns = [f'{code}_pred_price' for code in stock_codes],
+    )
+    forecast_df = forecast_df.round(1).astype(int)
+    forecast_df = forecast_df.reset_index().rename(columns={'index': 'pred_date'})
+    forecast_df['inference_date'] = time.strftime('%Y-%m-%d')
+
+    engine = create_engine(postgres_uri)
+    forecast_df.to_sql(table_name, con=engine, if_exists='replace', index=False)
+    print(f'Saved 1-day forecast to PostgreSQL table: {table_name}')
+    return forecast_df
