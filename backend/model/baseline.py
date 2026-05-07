@@ -4,6 +4,8 @@ Stock Return Baseline Models. 評估 2026-01-01 到 2026-05-30 的表現
   1. Naive（隨機遊走）：預測值 = 上一期的值
   2. Moving Average：預測值 = 前 N 期的平均
   3. AR(p)（自回歸模型）：用 statsmodels AutoReg 擬合
+
+  Note: 目前是直接用股價的變動率（change）而非百分比報酬率（pct_change）
 """
 
 import numpy as np
