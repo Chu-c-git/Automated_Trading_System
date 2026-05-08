@@ -7,7 +7,7 @@ Public API:
   - evaluate_metrics                : one-step RMSE / R² over a DataLoader
   - recursive_forecast              : autoregressive n-step price forecast
   - evaluate_autoregressive_metrics : rolling-window backtest
-  - save_forecast_to_db             : run 1-day forecast and persist to PostgreSQL
+  - build_forecast_df               : run 1-day forecast and return long-format DataFrame
 """
 
 import copy
@@ -44,9 +44,13 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
                X_test:  np.ndarray, y_test:  np.ndarray,
                y_scaler, stock_codes,
                hidden_size=64, num_layers=3, dropout=0.3,
-               lr=0.001, batch_size=32, num_epochs=100, eval_every=5):
+               lr=0.001, batch_size=32, num_epochs=100, eval_every=5) -> tuple[
+    'LSTMModel', mlflow.ActiveRun,
+    DataLoader, DataLoader,
+    torch.device, np.ndarray, np.ndarray,
+]:
     """
-    Returns (best_model, mlflow_run, train_loader, test_loader, device).
+    Returns (best_model, mlflow_run, train_loader, test_loader, device, train_rmse, train_r2).
     X_train / y_train are already-scaled numpy arrays of shape (samples, seq_len, features).
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -82,7 +86,7 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
             avg_loss = total_loss / len(train_loader)
 
             if (epoch + 1) % eval_every == 0:
-                rmse, _ = evaluate_metrics(model, train_loader, y_scaler, device)
+                rmse, _, _, _ = evaluate_metrics(model, train_loader, y_scaler, device)
                 avg_ret_rmse = float(rmse.mean())
 
                 metrics = {'train_mse_scaled': avg_loss, 'train_rmse_ret_avg': avg_ret_rmse}
@@ -102,13 +106,23 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
         mlflow.pytorch.log_model(model, name='best_LSTM')
         print(f'Best train RMSE (ret avg): {best_rmse:.6f}')
 
-    return model, run, train_loader, test_loader, device
+    train_rmse, train_r2, _, _ = evaluate_metrics(model, train_loader, y_scaler, device)
+    return model, run, train_loader, test_loader, device, train_rmse, train_r2
 
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
 
 def evaluate_metrics(model, data_loader, y_scaler, device):
-    """One-step-ahead RMSE and R² arrays (one value per stock)."""
+    """
+    One-step-ahead RMSE, R², pred_mean_ret, next_day_pred_ret per stock.
+
+    Returns
+    -------
+    rmse            : (n_stocks,)
+    r2              : (n_stocks,)
+    pred_mean_ret   : (n_stocks,)  平均預測報酬率（bias 指標）
+    next_day_pred_ret: (n_stocks,) 最後一個 batch 最後一筆的預測值（次日訊號）
+    """
     model.eval()
     preds, trues = [], []
     with torch.no_grad():
@@ -117,9 +131,11 @@ def evaluate_metrics(model, data_loader, y_scaler, device):
             trues.append(y_b.numpy())
     p = y_scaler.inverse_transform(np.concatenate(preds))
     t = y_scaler.inverse_transform(np.concatenate(trues))
-    rmse = np.sqrt(np.mean((p - t) ** 2, axis=0))
-    r2   = np.array([r2_score(t[:, i], p[:, i]) for i in range(t.shape[1])])
-    return rmse, r2
+    rmse              = np.sqrt(np.mean((p - t) ** 2, axis=0))
+    r2                = np.array([r2_score(t[:, i], p[:, i]) for i in range(t.shape[1])])
+    pred_mean_ret     = p.mean(axis=0)
+    next_day_pred_ret = p[-1]
+    return rmse, r2, pred_mean_ret, next_day_pred_ret
 
 
 def evaluate_autoregressive_metrics(model, X_test_np, y_test_np, x_scaler, y_scaler,
@@ -201,14 +217,14 @@ def recursive_forecast(model, seed_X_scaled, n_steps, x_scaler, y_scaler,
 
 # ── DB persistence ───────────────────────────────────────────────────────────
 
-def save_forecast_to_db(model, X_test_np, df_test, close_wide,
-                        x_scaler, y_scaler, feature_cols, stock_codes,
-                        postgres_uri: str, device,
-                        table_name: str = 'lstm_prediction'):
+def build_forecast_df(model, X_test_np, df_test, close_wide,
+                      x_scaler, y_scaler, feature_cols, stock_codes,
+                      device, category: str) -> pd.DataFrame:
     """
-    Run a 1-day forecast from the last test window and write to PostgreSQL.
+    Run a 1-day forecast from the last test window.
 
-    Returns the forecast_df that was saved.
+    Returns a long-format DataFrame with columns:
+        pred_date, inference_date, category, stock_code, pred_price, pred_ret_pct
     """
     seed       = X_test_np[-1]
     last_close = df_test[close_wide.columns].iloc[-1].values
@@ -219,17 +235,17 @@ def save_forecast_to_db(model, X_test_np, df_test, close_wide,
         last_close=last_close, feature_cols=feature_cols, device=device,
     )
 
-    future_dates = pd.date_range(start=close_wide.index[-1], periods=2)[1:]
-    forecast_df  = pd.DataFrame(
-        forecast_prices,
-        index   = future_dates,
-        columns = [f'{code}_pred_price' for code in stock_codes],
-    )
-    forecast_df = forecast_df.round(1).astype(int)
-    forecast_df = forecast_df.reset_index().rename(columns={'index': 'pred_date'})
-    forecast_df['inference_date'] = time.strftime('%Y-%m-%d')
+    pred_date      = pd.date_range(start=close_wide.index[-1], periods=2)[1]
+    inference_date = time.strftime('%Y-%m-%d')
 
-    engine = create_engine(postgres_uri)
-    forecast_df.to_sql(table_name, con=engine, if_exists='replace', index=False)
-    print(f'Saved 1-day forecast to PostgreSQL table: {table_name}')
-    return forecast_df
+    rows = []
+    for i, code in enumerate(stock_codes):
+        rows.append({
+            'pred_date':      pred_date,
+            'inference_date': inference_date,
+            'category':       category,
+            'stock_code':     code,
+            'pred_price':     round(float(forecast_prices[0, i]), 1),
+            'pred_ret_pct':   round(float(forecast_rets[0, i]) * 100, 2),
+        })
+    return pd.DataFrame(rows)

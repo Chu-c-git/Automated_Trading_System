@@ -2,15 +2,24 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-EXTRA_COLS = ['open', 'high', 'low', 'capacity', 'turnover', 'transaction_volume', 'change']
+EXTRA_COLS = ['open', 'high', 'low', 'capacity', 'turnover', 'transaction_volume']
 
 
-def build_features(df: pd.DataFrame, train_ratio: float = 0.9):
+def build_features(df: pd.DataFrame, train_ratio: float = None,
+                   test_start: str = None) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    pd.DataFrame, pd.DataFrame,
+    StandardScaler, StandardScaler,
+    list, list, pd.DataFrame,
+]:
     """
     Input : raw df with columns [date, stock_code_id, close, open, high, low, ...]
     Output: X_train_scaled, X_test_scaled, y_train_scaled, y_test_scaled,
             df_train, df_test, x_scaler, y_scaler,
             feature_cols, target_cols, close_wide
+
+    Pass either test_start (fixed date, e.g. '2025-01-01') or train_ratio.
+    test_start takes priority.
     """
     selected_stocks = sorted(df['stock_code_id'].unique())
 
@@ -24,7 +33,7 @@ def build_features(df: pd.DataFrame, train_ratio: float = 0.9):
         .pivot_table(index='date', columns='stock_code_id', values='close', aggfunc='mean')
         .sort_index().ffill().bfill()
     )
-    close_wide.columns = [f"close_{int(c)}" for c in close_wide.columns]
+    close_wide.columns = [f"close_{str(c)}" for c in close_wide.columns]
 
     # ── extra OHLCV + change pivots ──────────────────────────────────────────
     extra_wide_list = []
@@ -35,7 +44,7 @@ def build_features(df: pd.DataFrame, train_ratio: float = 0.9):
             .pivot_table(index='date', columns='stock_code_id', values=col, aggfunc='mean')
             .sort_index().ffill().bfill()
         )
-        w.columns = [f"{col}_{int(c)}" for c in w.columns]
+        w.columns = [f"{col}_{str(c)}" for c in w.columns]
         extra_wide_list.append(w)
 
     # ── return & cross-stock features ────────────────────────────────────────
@@ -59,9 +68,15 @@ def build_features(df: pd.DataFrame, train_ratio: float = 0.9):
     target_cols  = ret_wide.columns.tolist()
     feature_cols = feature_df.columns.tolist()
 
-    n_train  = int(len(feature_df) * train_ratio)
-    df_train = feature_df.iloc[:n_train]
-    df_test  = feature_df.iloc[n_train:]
+    if test_start is not None:
+        cut = pd.Timestamp(test_start)
+        df_train = feature_df[feature_df.index < cut]
+        df_test  = feature_df[feature_df.index >= cut]
+    else:
+        ratio    = train_ratio if train_ratio is not None else 0.9
+        n_train  = int(len(feature_df) * ratio)
+        df_train = feature_df.iloc[:n_train]
+        df_test  = feature_df.iloc[n_train:]
 
     x_scaler = StandardScaler()
     y_scaler = StandardScaler()
@@ -80,7 +95,7 @@ def build_features(df: pd.DataFrame, train_ratio: float = 0.9):
     )
 
 
-def create_sequences(X_array: np.ndarray, y_array: np.ndarray, seq_len: int):
+def create_sequences(X_array: np.ndarray, y_array: np.ndarray, seq_len: int) -> tuple[np.ndarray, np.ndarray]:
     X_out, y_out = [], []
     for i in range(len(X_array) - seq_len):
         X_out.append(X_array[i:i + seq_len])

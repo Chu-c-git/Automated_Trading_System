@@ -1,165 +1,150 @@
 """
-Stock Return Baseline Models. 評估 2026-01-01 到 2026-05-30 的表現
+Stock Return Baseline Models.
 三種 baseline：
   1. Naive（隨機遊走）：預測值 = 上一期的值
   2. Moving Average：預測值 = 前 N 期的平均
   3. AR(p)（自回歸模型）：用 statsmodels AutoReg 擬合
 
-  Note: 目前是直接用股價的變動率（change）而非百分比報酬率（pct_change）
+目標變數統一使用 pct_change（報酬率），與 LSTM 對齊。
+Test set 切法由外部傳入，確保與 LSTM 使用相同日期區間。
 """
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from sklearn.metrics import r2_score, mean_squared_error
-from dotenv import load_dotenv
-from sqlalchemy import create_engine
 from statsmodels.tsa.ar_model import AutoReg
-import timeit
-from tqdm import tqdm
-import os
-import json
-load_dotenv()
 
-DB_URI = os.getenv("POSTGRES_URI")
-TABLE_NAME = "daily_info_"
-STOCK_LIST_PATH = '/app/data/top5_stocks_by_category.json'
-START_DATE = '2026-01-01'
-END_DATE = '2026-05-05'
-with open(STOCK_LIST_PATH, 'r') as f:
-    data = json.load(f)
-    STOCK_CODE_LIST = [ code for codes in data.values() for code in codes]
 
-# 
-def fetch_data() -> pd.Series:
-
-    engine = create_engine(DB_URI)
-    table_list = []
-    print(STOCK_CODE_LIST)
-    with engine.connect() as conn:
-        for code in tqdm(STOCK_CODE_LIST, desc="Fetching data", total=len(STOCK_CODE_LIST)):
-            try:
-                table_name = TABLE_NAME + str(code)
-                sql = f"""
-                SELECT change, close, date
-                FROM "{table_name}"
-                WHERE date >= '{START_DATE}' AND date <= '{END_DATE}'
-                ORDER BY date ASC
-                """
-                table = pd.read_sql(sql, conn, index_col="date")
-                table.index = pd.to_datetime(table.index)
-                table = table.rename(columns={"change": f"change_{code}", "close": f"close_{code}"})
-                table_list.append(table)
-            except Exception as e:
-                print(f"Error fetching data for stock code {code}: {e}")
-    df = pd.concat(table_list, axis=1)
-    print(df.shape)
-    print(df.info())
-    print(df.head())
-    return df
-
-# ── 評估函式（三種 baseline 共用）────────────────────────────────────────────
-
-def evaluate(y_true: pd.Series, y_pred: pd.Series, name: str) -> dict:
-    # 計算 R²、RMSE、以及 RMSE 除以 y_true 標準差（正規化 RMSE）
-    r_squared = r2_score(y_true, y_pred)
+def _evaluate(y_true: pd.Series, y_pred: pd.Series, name: str,
+              actual_mean_ret: float, next_day_pred_ret: float,
+              train_r2: float, train_rmse: float) -> dict:
+    r2   = r2_score(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    rmse_norm = rmse / np.std(y_true)
-
-    # 回傳一個 dict，key 為 "model", "r2", "rmse", "rmse_norm"
-    result_dict = {
-        "model": name,
-        "r2": r_squared,
-        "rmse": rmse,
-        "rmse_norm": rmse_norm
+    return {
+        "model":              name,
+        "train_r2":           train_r2,
+        "train_rmse":         train_rmse,
+        "test_r2":            r2,
+        "test_rmse":          rmse,
+        "pred_mean_ret":      float(y_pred.mean()),
+        "actual_mean_ret":    actual_mean_ret,
+        "next_day_pred_ret":  next_day_pred_ret,
     }
-    return result_dict
 
 
-# ── Baseline 1：Naive（隨機遊走）────────────────────────────────────────────
-
-def naive_baseline(y: pd.Series, stock_code: str) -> dict:
-    # Step 1：產生預測值：把 y 向後位移一期（shift(1)）
-    y_pred = y.shift(1)
-    
-    # Step 2：對齊 y_true 與 y_pred（去掉 NaN 的那一列）
-    y_true = y[y_pred.notna()]
-    y_pred = y_pred[y_pred.notna()]
-
-    # Step 3：呼叫 evaluate，name 設為 "Naive"
-    evaluate_result = evaluate(y_true, y_pred, name=f"Naive_{stock_code}")
-    return evaluate_result
+def _split(ret: pd.Series, test_start: str):
+    """依固定日期切 train / test。"""
+    train = ret[ret.index < test_start]
+    test  = ret[ret.index >= test_start]
+    return train, test
 
 
-# ── Baseline 2：Moving Average──────────────────────────────────────────────
+# ── Baseline 1：Naive ────────────────────────────────────────────────────────
 
-def ma_baseline(y: pd.Series, stock_code: str, window: int = 5) -> dict:
-    # Step 1：計算 rolling mean（window 期），再 shift(1) 避免 lookahead
-    rol_mean = y.rolling(window=window).mean()
-    y_pred = rol_mean.shift(1)
+def naive_baseline(ret: pd.Series, stock_code: str, test_start: str) -> dict:
+    train, test = _split(ret, test_start)
+    shifted     = ret.shift(1)
 
-    # Step 2：對齊 y_true 與 y_pred（dropna）
-    y_true = y[y_pred.notna()]
-    y_pred = y_pred[y_pred.notna()]
+    tr_pred = shifted.reindex(train.index)
+    tr_mask = tr_pred.notna()
+    tr_r2   = r2_score(train[tr_mask], tr_pred[tr_mask])
+    tr_rmse = np.sqrt(mean_squared_error(train[tr_mask], tr_pred[tr_mask]))
 
-    # Step 3：呼叫 evaluate，name 設為 f"MA({window})"
-    evaluate_result = evaluate(y_true, y_pred, name=f"Mov_Avg_({window}Day)_{stock_code}")
-    return evaluate_result
+    y_pred = shifted.reindex(test.index)
+    mask   = y_pred.notna()
+    y_true, y_pred = test[mask], y_pred[mask]
+
+    actual_mean_ret   = float(y_true.mean())
+    next_day_pred_ret = float(ret.iloc[-1])
+
+    return _evaluate(y_true, y_pred,
+                     name=f"Naive_{stock_code}",
+                     actual_mean_ret=actual_mean_ret,
+                     next_day_pred_ret=next_day_pred_ret,
+                     train_r2=tr_r2, train_rmse=tr_rmse)
 
 
-# ── Baseline 3：AR(p) 自回歸模型────────────────────────────────────────────
+# ── Baseline 2：Moving Average ───────────────────────────────────────────────
 
-def ar_baseline(y: pd.Series, stock_code: str, lags: int = 5, test_size: float = 0.2) -> dict:
-    # Step 1：依 test_size 切分 train / test（時間序列不可隨機切！）
-    split_point = int(len(y) * (1 - test_size))
-    y_train = y.iloc[:split_point]
-    y_test = y.iloc[split_point:]
+def ma_baseline(ret: pd.Series, stock_code: str, test_start: str,
+                window: int = 5) -> dict:
+    train, test = _split(ret, test_start)
+    rolled      = ret.rolling(window=window).mean().shift(1)
 
-    # Step 2：用 statsmodels AutoReg(y_train, lags=lags).fit() 訓練
-    model = AutoReg(y_train, lags=lags).fit()
+    tr_pred = rolled.reindex(train.index)
+    tr_mask = tr_pred.notna()
+    tr_r2   = r2_score(train[tr_mask], tr_pred[tr_mask])
+    tr_rmse = np.sqrt(mean_squared_error(train[tr_mask], tr_pred[tr_mask]))
 
-    # Step 3：用 model.predict(start, end) 產生 test 區間的預測值
-    y_pred = model.predict(start=split_point, end=len(y)-1)
+    y_pred = rolled.reindex(test.index)
+    mask   = y_pred.notna()
+    y_true, y_pred = test[mask], y_pred[mask]
+
+    actual_mean_ret   = float(y_true.mean())
+    next_day_pred_ret = float(ret.rolling(window=window).mean().iloc[-1])
+
+    return _evaluate(y_true, y_pred,
+                     name=f"MA({window})_{stock_code}",
+                     actual_mean_ret=actual_mean_ret,
+                     next_day_pred_ret=next_day_pred_ret,
+                     train_r2=tr_r2, train_rmse=tr_rmse)
+
+
+# ── Baseline 3：AR(p) ────────────────────────────────────────────────────────
+
+def ar_baseline(ret: pd.Series, stock_code: str, test_start: str,
+                lags: int = 5) -> dict:
+    ret = ret.rename(stock_code)
+    train, test = _split(ret, test_start)
+
+    model  = AutoReg(train, lags=lags).fit()
+    start  = len(train)
+    end    = len(train) + len(test) - 1
+    y_pred = model.predict(start=start, end=end)
 
     if not isinstance(y_pred, pd.Series):
-        y_pred = pd.Series(y_pred, index=y_test.index)
-    y_pred = y_pred.iloc[:len(y_test)]
+        y_pred = pd.Series(y_pred, index=test.index)
+    y_pred = y_pred.iloc[:len(test)]
+    y_true = test.iloc[:len(y_pred)]
 
-    # Step 4：呼叫 evaluate，name 設為 f"AR({lags})"
-    evaluate_result = evaluate(y_test, y_pred, name=f"AutoReg_({lags}day)_{stock_code}")
-    return evaluate_result
+    actual_mean_ret = float(y_true.mean())
+
+    tr_pred = model.fittedvalues
+    tr_true = train.reindex(tr_pred.index)
+    mask    = ~np.isnan(tr_pred.values)
+    tr_r2   = r2_score(tr_true.values[mask], tr_pred.values[mask])
+    tr_rmse = np.sqrt(mean_squared_error(tr_true.values[mask], tr_pred.values[mask]))
+
+    model_full        = AutoReg(ret, lags=lags).fit()
+    next_day_pred_ret = float(model_full.predict(start=len(ret), end=len(ret)).iloc[0])
+
+    return _evaluate(y_true, y_pred,
+                     name=f"AR({lags})_{stock_code}",
+                     actual_mean_ret=actual_mean_ret,
+                     next_day_pred_ret=next_day_pred_ret,
+                     train_r2=tr_r2, train_rmse=tr_rmse)
 
 
-# ── 主程式：跑完三種 baseline 並印出比較表────────────────────────────────────
+# ── 對外 API：接受 ret_wide（已算好的報酬率 DataFrame）────────────────────────
 
-def run_all_baselines(ma_window: int = 5, ar_lags: int = 5):
+def run_baselines(ret_wide: pd.DataFrame, test_start: str,
+                  ma_window: int = 5, ar_lags: int = 5) -> pd.DataFrame:
+    """
+    Parameters
+    ----------
+    ret_wide   : columns = stock_code（整數或字串），index = date，值為 pct_change
+    test_start : '2025-01-01'
+
+    Returns
+    -------
+    DataFrame with one row per (model, stock_code)
+    """
     results = []
-    raw_df = fetch_data()
-    target_col_list = [col for col in raw_df.columns if col.startswith("change_")]
-    for col in target_col_list:
-        print(f"Evaluating baselines for {col}...")
-        y = raw_df[col].dropna()
-        stock_code = col.split("_")[1]
-        # Step 1：依序呼叫 naive_baseline、ma_baseline、ar_baseline，把回傳的 dict append 進 results
-        results.append(naive_baseline(y, stock_code))
-        results.append(ma_baseline(y, stock_code, window=ma_window))
-        results.append(ar_baseline(y, stock_code, lags=ar_lags, test_size=0.2))
+    for col in ret_wide.columns:
+        ret        = ret_wide[col].dropna()
+        stock_code = str(col)
+        results.append(naive_baseline(ret, stock_code, test_start))
+        results.append(ma_baseline(ret, stock_code, test_start, window=ma_window))
+        results.append(ar_baseline(ret, stock_code, test_start, lags=ar_lags))
 
-    # Step 2：用 pd.DataFrame(results) 整理成表格後印出
-    eval_df = pd.DataFrame(results)
-    eval_df['start_date'] = START_DATE
-    eval_df['end_date'] = END_DATE
-
-    # Step 3: 存到 PG，table name 可以叫 "baseline_evaluation"
-    engine = create_engine(DB_URI)
-    with engine.connect() as conn:
-        eval_df.to_sql("baseline_evaluation", conn, if_exists="replace", index=False)
-        print(">>> Baseline evaluation results saved to PostgreSQL table 'baseline_evaluation'.")
-        print(eval_df)
-        
-
-
-if __name__ == "__main__":
-    exec_time = timeit.timeit(run_all_baselines, number=1)
-    print(f"Total execution time: {exec_time:.2f} seconds")
-    pass
+    return pd.DataFrame(results)

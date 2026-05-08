@@ -34,15 +34,11 @@ PG_URI = os.getenv("POSTGRES_URI")
 
 log_path = Path("/app/logs/error.log")
 log_path.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.ERROR,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(log_path, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-    force=True,
-)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)
+_fh = logging.FileHandler(log_path, encoding="utf-8")
+_fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(_fh)
 
 OUTPUT_JSON_PATH = Path("/app/data/topk_stocks_by_industries.json")
 TARGET_CATEGORIES = [
@@ -87,7 +83,7 @@ def _filter_liquidity(
         )
         return month_stock_vol[mask]
     except Exception as e:
-        logging.error(f"Error fetching liquidity data: {e}")
+        logger.error(f"Error fetching liquidity data: {e}")
         return pd.DataFrame()
 
 
@@ -192,7 +188,7 @@ def _get_latest_date_for_stock(code: str, engine) -> datetime | None:
 def _save_stock_data(code: str, start_date: str, end_date: str, engine, already_exist: str):
     code_df = get_twse_stock_data(code, start_date, end_date)
     if code_df is None or code_df.empty:
-        logging.error(f"No data returned for {code} ({start_date} ~ {end_date})")
+        logger.warning(f"No data returned for {code} ({start_date} ~ {end_date})")
         return
 
     num_cols = ["capacity", "turnover", "high", "low", "close", "change", "transaction_volume", "open"]
@@ -226,7 +222,7 @@ def download_stock_data_to_db(
         json_path: Path to topk_stocks_by_industries.json (used when stock_codes is None).
     """
     if end_date is None:
-        end_date = datetime.now().strftime("%Y%m%d")
+        end_date = (datetime.now() - pd.Timedelta(days=1)).strftime("%Y%m%d")
 
     if stock_codes is None:
         if not json_path.exists():
@@ -253,6 +249,9 @@ def download_stock_data_to_db(
                     # Table doesn't exist — full download
                     effective_start = fallback_start
                     if_exists = "replace"
+                elif latest == pd.to_datetime(end_date):
+                    print(f"  {code}: already up to date (latest={latest.date()}), skipping.")
+                    continue
                 else:
                     next_day = latest + pd.Timedelta(days=1)
                     effective_start = next_day.strftime("%Y%m%d")
@@ -265,10 +264,10 @@ def download_stock_data_to_db(
                 if_exists = "replace"
 
             _save_stock_data(code, effective_start, end_date, engine, if_exists)
-            logging.info(f"Finished {code}: {effective_start} ~ {end_date} ({if_exists})")
+            logger.info(f"Finished {code}: {effective_start} ~ {end_date} ({if_exists})")
 
         except Exception as e:
-            logging.error(f"Error processing {code}: {e}")
+            logger.error(f"Error processing {code}: {e}")
 
     print("Done.")
 

@@ -31,7 +31,7 @@ def get_stock_data(stock_code, start_date: str, end_date: str, return_all=False)
     table_name = f'daily_info_{stock_code}'
     query = f"""
     SELECT *
-    FROM {table_name}
+    FROM "{table_name}"
     WHERE stock_code_id = '{stock_code}'
       AND date BETWEEN '{start_date}' AND '{end_date}'
     ORDER BY date ASC;
@@ -47,14 +47,15 @@ def get_stock_data_by_category(category, start_date: str, end_date: str):
     category: 'ETF', '建材營造', '電子零組件業', '半導體業', '通信網路業'
     """
     stock_codes = stock_dict.get(category, [])
-    stock_codes = [int(code) for code in stock_codes]
+    stock_codes = [str(code) for code in stock_codes]
     all_data = []
     for code in stock_codes:
         try:
             df = get_stock_data(code, start_date, end_date)
-            all_data.append(df)
+            if not df.empty:
+                all_data.append(df)
         except Exception as e:
             print(f"Error fetching data for stock code {code}: {e}")
-    final_df = pd.concat(all_data, ignore_index=True)
-    # final_df = final_df.sort_values(by=['date', 'stock_code_id']).reset_index(drop=True)
-    return final_df
+    if not all_data:
+        return pd.DataFrame()
+    return pd.concat(all_data, ignore_index=True)
