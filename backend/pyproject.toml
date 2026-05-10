@@ -18,7 +18,9 @@ dependencies = [
     "pandas",
     "numpy",
     "seaborn",
-    "tqdm"
+    "tqdm",
+    "apscheduler>=3.10",
+    "statsmodels",
 ]
 
 [tool.uv]

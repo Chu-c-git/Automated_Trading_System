@@ -52,7 +52,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     ports:
-      - "8000:8000"
+      - "6001:8000"
     volumes:
       - ./backend:/app
       - .env:/app/.env
