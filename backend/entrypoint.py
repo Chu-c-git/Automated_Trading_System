@@ -8,11 +8,15 @@ Model Pipeline Entrypoint
   4. 合併比較表存入 PostgreSQL
      - model_comparison_per_stock
      - model_comparison_per_category
+  5. 交易執行（先賣後買）
+     - sell_stock: 停利 +10% / 停損 -10%
+     - buy_stock:  pred_ret_pct > 1%，取前25，前5買2張其餘1張
 """
 
 import json
 import logging
 import os
+import sys
 import time
 import timeit
 
@@ -22,14 +26,15 @@ import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
-from baseline import run_baselines
-from feature_engineering import build_features, create_sequences
-from LSTM import build_forecast_df, evaluate_metrics, train_lstm
-from utils import get_stock_data_by_category, init_mlflow
-
-import sys
 sys.path.insert(0, '/app')
+sys.path.insert(0, '/app/trade')
+from model.baseline import run_baselines
+from model.feature_engineering import build_features, create_sequences
+from model.LSTM import build_forecast_df, evaluate_metrics, train_lstm
+from model.utils import get_stock_data_by_category, init_mlflow
 from data_preprocess.data_preprocess import download_stock_data_to_db
+from trade.sell_stock import batch_sell_order
+from trade.buy_stock import check_pred_table, select_buy_candidates, batch_buy_order
 
 load_dotenv()
 
@@ -49,8 +54,8 @@ POSTGRES_URI: str = os.getenv("POSTGRES_URI", "")
 STOCK_DICT   = json.load(open('/app/data/topk_stocks_by_industries.json', 'r', encoding='utf-8'))
 
 TRAIN_START = '2020-01-01'
-TEST_START  = '2025-01-01'
 RUN_DATE    = time.strftime('%Y-%m-%d')
+TEST_START  = (pd.Timestamp(RUN_DATE) - pd.DateOffset(months=1)).strftime('%Y-%m-%d')
 
 SEQ_LEN    = 7
 MA_WINDOW  = 5
@@ -152,7 +157,7 @@ def _save_to_db(per_stock: pd.DataFrame, per_cat: pd.DataFrame,
     with engine.begin() as conn:
         per_stock.to_sql('model_comparison_per_stock',  conn, if_exists='replace', index=False)
         per_cat.to_sql('model_comparison_per_category', conn, if_exists='replace', index=False)
-        forecast.to_sql('lstm_prediction',              conn, if_exists='replace', index=False)
+        forecast.to_sql('lstm_prediction',              conn, if_exists='append', index=False)
     print(f"[{RUN_DATE}] Saved comparison tables to PostgreSQL.")
 
 
@@ -235,6 +240,30 @@ def run_pipeline():
         logger.info("Comparison tables saved to PostgreSQL.")
     except Exception:
         logger.exception("Failed to save comparison tables to PostgreSQL.")
+
+    # ── 交易執行：先賣後買 ────────────────────────────────────────────────────
+    logger.info("=" * 60)
+    logger.info("Starting trade execution (sell → buy)")
+
+    try:
+        logger.info("Running sell strategy...")
+        batch_sell_order()
+        logger.info("Sell strategy completed.")
+    except Exception:
+        logger.exception("Sell strategy failed.")
+
+    try:
+        logger.info("Running buy strategy...")
+        pred_table = check_pred_table()
+        if pred_table is not None and not pred_table.empty:
+            candidates = select_buy_candidates(pred_table)
+            logger.info(f"Buy candidates: {len(candidates)} stocks")
+            batch_buy_order(candidates)
+            logger.info("Buy strategy completed.")
+        else:
+            logger.warning("No prediction data found — skipping buy.")
+    except Exception:
+        logger.exception("Buy strategy failed.")
 
 
 if __name__ == "__main__":

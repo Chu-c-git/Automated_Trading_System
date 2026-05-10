@@ -8,17 +8,16 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 
 sys.path.insert(0, '/app')
-sys.path.insert(0, '/app/model')
 
 logger = logging.getLogger(__name__)
 
 
 async def _run_pipeline():
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, '/app/model/entrypoint.py',
+        sys.executable, '/app/entrypoint.py',
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        cwd='/app/model',
+        cwd='/app',
     )
     async for line in proc.stdout:
         logger.info(line.decode().rstrip())

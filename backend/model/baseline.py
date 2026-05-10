@@ -97,25 +97,22 @@ def ar_baseline(ret: pd.Series, stock_code: str, test_start: str,
     ret = ret.rename(stock_code)
     train, test = _split(ret, test_start)
 
-    model  = AutoReg(train, lags=lags).fit()
+    # 用純 RangeIndex 傳入 AutoReg，避免 DatetimeIndex 缺頻率的警告
+    model  = AutoReg(pd.Series(train.values, dtype=float), lags=lags).fit()
     start  = len(train)
     end    = len(train) + len(test) - 1
-    y_pred = model.predict(start=start, end=end)
-
-    if not isinstance(y_pred, pd.Series):
-        y_pred = pd.Series(y_pred, index=test.index)
-    y_pred = y_pred.iloc[:len(test)]
+    y_pred = pd.Series(model.predict(start=start, end=end).values, index=test.index)
     y_true = test.iloc[:len(y_pred)]
 
     actual_mean_ret = float(y_true.mean())
 
-    tr_pred = model.fittedvalues
-    tr_true = train.reindex(tr_pred.index)
-    mask    = ~np.isnan(tr_pred.values)
-    tr_r2   = r2_score(tr_true.values[mask], tr_pred.values[mask])
-    tr_rmse = np.sqrt(mean_squared_error(tr_true.values[mask], tr_pred.values[mask]))
+    tr_pred_vals = model.fittedvalues.values
+    tr_true      = train.iloc[len(train) - len(tr_pred_vals):]
+    mask         = ~np.isnan(tr_pred_vals)
+    tr_r2        = r2_score(tr_true.values[mask], tr_pred_vals[mask])
+    tr_rmse      = np.sqrt(mean_squared_error(tr_true.values[mask], tr_pred_vals[mask]))
 
-    model_full        = AutoReg(ret, lags=lags).fit()
+    model_full        = AutoReg(pd.Series(ret.values, dtype=float), lags=lags).fit()
     next_day_pred_ret = float(model_full.predict(start=len(ret), end=len(ret)).iloc[0])
 
     return _evaluate(y_true, y_pred,

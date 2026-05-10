@@ -235,7 +235,7 @@ def build_forecast_df(model, X_test_np, df_test, close_wide,
         last_close=last_close, feature_cols=feature_cols, device=device,
     )
 
-    pred_date      = pd.date_range(start=close_wide.index[-1], periods=2)[1]
+    pred_date      = close_wide.index[-1] + pd.offsets.BDay(1)
     inference_date = time.strftime('%Y-%m-%d')
 
     rows = []
