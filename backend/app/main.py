@@ -9,6 +9,11 @@ from fastapi import FastAPI
 
 sys.path.insert(0, '/app')
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -29,9 +34,9 @@ async def _run_pipeline():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
-    scheduler.add_job(_run_pipeline, CronTrigger(hour=11, minute=0))
+    scheduler.add_job(_run_pipeline, CronTrigger(hour=12, minute=0))
     scheduler.start()
-    logger.info("Scheduler started — pipeline runs daily at 11:00 Asia/Taipei")
+    logger.info("Scheduler started — pipeline runs daily at 12:00 Asia/Taipei")
     yield
     scheduler.shutdown()
 
