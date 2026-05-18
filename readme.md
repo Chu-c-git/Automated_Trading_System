@@ -1,13 +1,20 @@
-# Deep Learning Project - Automated Trading System 
+# Automated Trading System using DRL
 An production-ready project combining model training, monitoring and automated trading.
 
+**Course |** Fundamentals of deep learning networks: Theory and industrial applications (NCKU IIMS)
+
 **Data Source |**
+
+**Demo |**
 
 ## Install
 ```
 docker compose up -d
 ```
 ## Structure
+
+## HuggingFace Model
+
 
 
 <details>

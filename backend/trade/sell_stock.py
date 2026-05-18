@@ -37,8 +37,8 @@ PASSWORD = os.getenv('STOCK_ACCOUNT_PASSWORD')
 PG_URI   = os.getenv('POSTGRES_URI')
 ENGINE   = sqlalchemy.create_engine(PG_URI)
 
-TAKE_PROFIT_PCT = 10.0  # 停利：漲超過 10%
-STOP_LOSS_PCT   = 10.0  # 停損：跌超過 10%
+TAKE_PROFIT_PCT = 5.0  # 停利：漲超過 10%
+STOP_LOSS_PCT   = 5.0  # 停損：跌超過 10%
 
 
 def fetch_current_price(stock_code: str) -> float | None:
