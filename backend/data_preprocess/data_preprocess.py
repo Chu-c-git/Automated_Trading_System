@@ -166,9 +166,8 @@ def generate_stock_selection(
 # Module 2: Download stock daily data to PostgreSQL
 # =============================================================================
 
-def _get_latest_date_for_stock(code: str, engine) -> datetime | None:
-    """Return the latest date in daily_info_{code} table, or None if not found."""
-    table_name = f"daily_info_{code}"
+def _get_latest_date(table_name: str, engine) -> pd.Timestamp | None:
+    """Return MAX(date) for any table, or None if the table doesn't exist."""
     check_sql = f"""
         SELECT table_name FROM information_schema.tables
         WHERE table_name = '{table_name}'
@@ -177,12 +176,16 @@ def _get_latest_date_for_stock(code: str, engine) -> datetime | None:
         exists = pd.read_sql(check_sql, conn)
     if exists.empty:
         return None
-
     date_sql = f'SELECT MAX(date) AS max_date FROM "{table_name}"'
     with engine.connect() as conn:
         result = pd.read_sql(date_sql, conn)
     max_date = result["max_date"].iloc[0]
     return pd.Timestamp(max_date) if max_date is not None else None
+
+
+def _get_latest_date_for_stock(code: str, engine) -> datetime | None:
+    """Return the latest date in daily_info_{code} table, or None if not found."""
+    return _get_latest_date(f"daily_info_{code}", engine)
 
 
 def _save_stock_data(code: str, start_date: str, end_date: str, engine, already_exist: str):
@@ -196,6 +199,210 @@ def _save_stock_data(code: str, start_date: str, end_date: str, engine, already_
     code_df["date"] = pd.to_datetime(code_df["date"], unit="s")
     code_df["stock_code_id"] = code_df["stock_code_id"].astype(str)
     code_df.to_sql(name=f"daily_info_{code}", con=engine, if_exists=already_exist, index=False)
+
+
+# =============================================================================
+# Module 3: Download institutional investor & margin purchase/short sale data
+# =============================================================================
+
+def _to_finmind_date(date_str: str) -> str:
+    """Convert YYYYMMDD to YYYY-MM-DD required by FinMind async API."""
+    if len(date_str) == 8 and "-" not in date_str:
+        return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+    return date_str
+
+
+def _load_stock_codes(stock_codes: list[str] | None, json_path: Path) -> list[str]:
+    """Load and deduplicate stock codes from explicit list or JSON file."""
+    if stock_codes is not None:
+        return stock_codes
+    if not json_path.exists():
+        raise FileNotFoundError(
+            f"{json_path} not found. Run generate_stock_selection() first."
+        )
+    with open(json_path, "r", encoding="utf-8") as f:
+        stock_dict = json.load(f)
+    codes = [code for codes in stock_dict.values() for code in codes]
+    return list(dict.fromkeys(codes))
+
+
+FINMIND_CHUNK_SIZE = 20  # FinMind free-tier row limit caps out around 30 stocks × full range
+
+
+def download_institutional_to_db(
+    stock_codes: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    json_path: Path = OUTPUT_JSON_PATH,
+    chunk_size: int = FINMIND_CHUNK_SIZE,
+):
+    """
+    Module 3a: Download institutional investors (三大法人) buy/sell data and
+    store in PostgreSQL as pivoted wide-format tables (institutional_{code}).
+
+    Incremental mode (start_date=None): checks MAX(date) per table, appends
+    only new rows. Full mode (start_date provided): replaces existing table.
+
+    Stocks are fetched in chunks of chunk_size to stay within FinMind's
+    free-tier single-request row limit.
+    """
+    if end_date is None:
+        end_date = (datetime.now() - pd.Timedelta(days=1)).strftime("%Y%m%d")
+
+    stock_codes = _load_stock_codes(stock_codes, json_path)
+    incremental_mode = start_date is None
+    engine = create_engine(PG_URI)
+    fallback_start = DEFAULT_START_DATE
+
+    print(f"[institutional] Mode: {'incremental' if incremental_mode else 'full'} | "
+          f"End: {end_date} | Stocks: {len(stock_codes)}")
+
+    if incremental_mode:
+        next_starts: dict[str, str] = {}
+        for code in stock_codes:
+            latest = _get_latest_date(f"institutional_{code}", engine)
+            if latest is None:
+                next_starts[code] = fallback_start
+            else:
+                next_day = (latest + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                next_starts[code] = next_day
+        codes_to_fetch = [c for c in stock_codes if next_starts[c] <= end_date]
+    else:
+        codes_to_fetch = stock_codes
+
+    if not codes_to_fetch:
+        print("[institutional] All stocks already up to date.")
+        return
+
+    api = DataLoader()
+    chunks = [codes_to_fetch[i:i + chunk_size] for i in range(0, len(codes_to_fetch), chunk_size)]
+    print(f"[institutional] Fetching {len(codes_to_fetch)} stocks in {len(chunks)} chunks...")
+
+    for chunk in tqdm(chunks, desc="Fetching institutional chunks"):
+        if incremental_mode:
+            effective_start = min(next_starts[c] for c in chunk)
+        else:
+            effective_start = start_date
+
+        df = api.taiwan_stock_institutional_investors(
+            stock_id_list=chunk,
+            start_date=_to_finmind_date(effective_start),
+            end_date=_to_finmind_date(end_date),
+            use_async=True,
+        )
+        if df is None or df.empty:
+            logger.warning(f"[institutional] No data for chunk {chunk}")
+            continue
+
+        df_pivot = df.pivot_table(
+            index=["date", "stock_id"],
+            columns="name",
+            values=["buy", "sell"],
+            aggfunc="first",
+        )
+        df_pivot.columns = [f"{val}_{name}" for val, name in df_pivot.columns]
+        df_pivot = df_pivot.reset_index()
+        df_pivot["date"] = pd.to_datetime(df_pivot["date"])
+
+        for code in chunk:
+            try:
+                sub = df_pivot[df_pivot["stock_id"] == code].copy()
+                if sub.empty:
+                    continue
+                if incremental_mode:
+                    if_exists = "replace" if next_starts[code] == fallback_start else "append"
+                else:
+                    if_exists = "replace"
+                sub.to_sql(name=f"institutional_{code}", con=engine, if_exists=if_exists, index=False)
+                logger.info(f"[institutional] {code}: {if_exists} ({len(sub)} rows)")
+            except Exception as e:
+                logger.error(f"[institutional] Error saving {code}: {e}")
+
+    print("[institutional] Done.")
+
+
+def download_margin_to_db(
+    stock_codes: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    json_path: Path = OUTPUT_JSON_PATH,
+    chunk_size: int = FINMIND_CHUNK_SIZE,
+):
+    """
+    Module 3b: Download margin purchase / short sale (融資融券) data and
+    store in PostgreSQL as wide-format tables (margin_{code}).
+
+    Incremental mode (start_date=None): checks MAX(date) per table, appends
+    only new rows. Full mode (start_date provided): replaces existing table.
+
+    Stocks are fetched in chunks of chunk_size to stay within FinMind's
+    free-tier single-request row limit.
+    """
+    if end_date is None:
+        end_date = (datetime.now() - pd.Timedelta(days=1)).strftime("%Y%m%d")
+
+    stock_codes = _load_stock_codes(stock_codes, json_path)
+    incremental_mode = start_date is None
+    engine = create_engine(PG_URI)
+    fallback_start = DEFAULT_START_DATE
+
+    print(f"[margin] Mode: {'incremental' if incremental_mode else 'full'} | "
+          f"End: {end_date} | Stocks: {len(stock_codes)}")
+
+    if incremental_mode:
+        next_starts: dict[str, str] = {}
+        for code in stock_codes:
+            latest = _get_latest_date(f"margin_{code}", engine)
+            if latest is None:
+                next_starts[code] = fallback_start
+            else:
+                next_day = (latest + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                next_starts[code] = next_day
+        codes_to_fetch = [c for c in stock_codes if next_starts[c] <= end_date]
+    else:
+        codes_to_fetch = stock_codes
+
+    if not codes_to_fetch:
+        print("[margin] All stocks already up to date.")
+        return
+
+    api = DataLoader()
+    chunks = [codes_to_fetch[i:i + chunk_size] for i in range(0, len(codes_to_fetch), chunk_size)]
+    print(f"[margin] Fetching {len(codes_to_fetch)} stocks in {len(chunks)} chunks...")
+
+    for chunk in tqdm(chunks, desc="Fetching margin chunks"):
+        if incremental_mode:
+            effective_start = min(next_starts[c] for c in chunk)
+        else:
+            effective_start = start_date
+
+        df = api.taiwan_stock_margin_purchase_short_sale(
+            stock_id_list=chunk,
+            start_date=_to_finmind_date(effective_start),
+            end_date=_to_finmind_date(end_date),
+            use_async=True,
+        )
+        if df is None or df.empty:
+            logger.warning(f"[margin] No data for chunk {chunk}")
+            continue
+
+        df["date"] = pd.to_datetime(df["date"])
+
+        for code in chunk:
+            try:
+                sub = df[df["stock_id"] == code].copy()
+                if sub.empty:
+                    continue
+                if incremental_mode:
+                    if_exists = "replace" if next_starts[code] == fallback_start else "append"
+                else:
+                    if_exists = "replace"
+                sub.to_sql(name=f"margin_{code}", con=engine, if_exists=if_exists, index=False)
+                logger.info(f"[margin] {code}: {if_exists} ({len(sub)} rows)")
+            except Exception as e:
+                logger.error(f"[margin] Error saving {code}: {e}")
+
+    print("[margin] Done.")
 
 
 def download_stock_data_to_db(
@@ -293,6 +500,18 @@ if __name__ == "__main__":
     p2.add_argument("--end-date", default=None, help="YYYYMMDD; defaults to today")
     p2.add_argument("--codes", nargs="*", default=None)
 
+    # Module 3a
+    p3a = subparsers.add_parser("institutional", help="Download institutional investors data to DB")
+    p3a.add_argument("--start-date", default=None, help="YYYYMMDD; omit for incremental mode")
+    p3a.add_argument("--end-date", default=None, help="YYYYMMDD; defaults to today")
+    p3a.add_argument("--codes", nargs="*", default=None)
+
+    # Module 3b
+    p3b = subparsers.add_parser("margin", help="Download margin purchase/short sale data to DB")
+    p3b.add_argument("--start-date", default=None, help="YYYYMMDD; omit for incremental mode")
+    p3b.add_argument("--end-date", default=None, help="YYYYMMDD; defaults to today")
+    p3b.add_argument("--codes", nargs="*", default=None)
+
     args = parser.parse_args()
 
     if args.command == "select":
@@ -302,6 +521,18 @@ if __name__ == "__main__":
         )
     elif args.command == "download":
         download_stock_data_to_db(
+            stock_codes=args.codes,
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
+    elif args.command == "institutional":
+        download_institutional_to_db(
+            stock_codes=args.codes,
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
+    elif args.command == "margin":
+        download_margin_to_db(
             stock_codes=args.codes,
             start_date=args.start_date,
             end_date=args.end_date,

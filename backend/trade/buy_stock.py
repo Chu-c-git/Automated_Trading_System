@@ -39,8 +39,8 @@ ENGINE = sqlalchemy.create_engine(PG_URI)
 TOP_N = 25          # 最多買入支數
 TOP_N_DOUBLE = 5    # 前幾名買 2 張
 MIN_RET_PCT = 1.0   # 報酬率門檻（%）
-SHARES_PER_ORDER = 5 # 每筆訂單買幾張（前 TOP_N_DOUBLE 名除外）
-SHARES_PER_ORDER_DOUBLE = 10 # 前 TOP_N_DOUBLE 名買幾張
+SHARES_PER_ORDER = 2 # 每筆訂單買幾張（前 TOP_N_DOUBLE 名除外）
+SHARES_PER_ORDER_DOUBLE = 1 # 前 TOP_N_DOUBLE 名買幾張
 
 
 def check_pred_table(inference_date: str | None = None) -> pd.DataFrame | None:
