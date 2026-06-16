@@ -66,10 +66,10 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
     params = dict(input_size=X_train.shape[2], hidden_size=hidden_size,
                   num_layers=num_layers, output_size=y_train.shape[1], dropout=dropout)
     model     = LSTMModel(**params).to(device)
-    loss_fn   = nn.MSELoss()
+    loss_fn   = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    best_rmse, best_state = float('inf'), None
+    best_mae, best_state = float('inf'), None
 
     with mlflow.start_run(nested=True) as run:
         mlflow.log_params(params)
@@ -86,28 +86,28 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
             avg_loss = total_loss / len(train_loader)
 
             if (epoch + 1) % eval_every == 0:
-                rmse, _, _, _ = evaluate_metrics(model, train_loader, y_scaler, device)
-                avg_ret_rmse = float(rmse.mean())
+                rmse, _, _, _, _, _ = evaluate_metrics(model, train_loader, y_scaler, device)
+                avg_ret_mae = float(rmse.mean())
 
-                metrics = {'train_mse_scaled': avg_loss, 'train_rmse_ret_avg': avg_ret_rmse}
+                metrics = {'train_mse_scaled': avg_loss, 'train_rmse_ret_avg': avg_ret_mae}
                 for i, code in enumerate(stock_codes):
                     metrics[f'train_rmse_ret_{code}'] = float(rmse[i])
                 mlflow.log_metrics(metrics, step=epoch)
 
                 print(f'Epoch[{epoch+1}/{num_epochs}] MSE={avg_loss:.4f}  '
-                      f'RMSE_ret_avg={avg_ret_rmse:.4f}  '
+                      f'RMSE_ret_avg={avg_ret_mae:.4f}  '
                       + '  '.join(f'{c}:{rmse[i]:.4f}' for i, c in enumerate(stock_codes)))
 
-                if avg_ret_rmse < best_rmse:
-                    best_rmse  = avg_ret_rmse
+                if avg_ret_mae < best_mae:
+                    best_mae  = avg_ret_mae
                     best_state = copy.deepcopy(model.state_dict())
 
         model.load_state_dict(best_state)
         mlflow.pytorch.log_model(model, name='best_LSTM')
-        print(f'Best train RMSE (ret avg): {best_rmse:.6f}')
+        print(f'Best train MAE (ret avg): {best_mae:.6f}')
 
-    train_rmse, train_r2, _, _ = evaluate_metrics(model, train_loader, y_scaler, device)
-    return model, run, train_loader, test_loader, device, train_rmse, train_r2
+    train_rmse, train_mae, train_r2, _, _, _ = evaluate_metrics(model, train_loader, y_scaler, device)
+    return model, run, train_loader, test_loader, device, train_rmse, train_mae, train_r2
 
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
@@ -132,10 +132,12 @@ def evaluate_metrics(model, data_loader, y_scaler, device):
     p = y_scaler.inverse_transform(np.concatenate(preds))
     t = y_scaler.inverse_transform(np.concatenate(trues))
     rmse              = np.sqrt(np.mean((p - t) ** 2, axis=0))
+    mae               = np.mean(np.abs(p - t), axis=0)
     r2                = np.array([r2_score(t[:, i], p[:, i]) for i in range(t.shape[1])])
+    hit_rate          = np.mean(np.sign(p) == np.sign(t), axis=0)
     pred_mean_ret     = p.mean(axis=0)
     next_day_pred_ret = p[-1]
-    return rmse, r2, pred_mean_ret, next_day_pred_ret
+    return rmse, mae, r2, hit_rate, pred_mean_ret, next_day_pred_ret
 
 
 def evaluate_autoregressive_metrics(model, X_test_np, y_test_np, x_scaler, y_scaler,

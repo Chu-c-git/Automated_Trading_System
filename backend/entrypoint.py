@@ -100,14 +100,14 @@ def _lstm_rows(df_raw: pd.DataFrame, category: str, stock_codes: list) -> tuple[
     X_train_np, y_train_np = create_sequences(X_tr, y_tr, seq_len=SEQ_LEN)
     X_test_np,  y_test_np  = create_sequences(X_te, y_te, seq_len=SEQ_LEN)
 
-    model, _, _, test_loader, device, train_rmse, train_r2 = train_lstm(
+    model, _, _, test_loader, device, train_rmse, train_mae, train_r2 = train_lstm(
         X_train_np, y_train_np, X_test_np, y_test_np,
         y_sc, stock_codes,
         hidden_size=HIDDEN, num_layers=NUM_LAYERS, dropout=DROPOUT,
         lr=LR, batch_size=BATCH_SIZE, num_epochs=EPOCHS, eval_every=EVAL_EVERY,
     )
 
-    rmse, r2, pred_mean_ret, next_day_pred_ret = evaluate_metrics(
+    rmse, mae, r2, hit_rate, pred_mean_ret, next_day_pred_ret = evaluate_metrics(
         model, test_loader, y_sc, device
     )
 
@@ -123,6 +123,8 @@ def _lstm_rows(df_raw: pd.DataFrame, category: str, stock_codes: list) -> tuple[
             'train_rmse':        float(train_rmse[i]),
             'test_r2':           float(r2[i]),
             'test_rmse':         float(rmse[i]),
+            'test_mae':          float(mae[i]),
+            'test_hit_rate':     float(hit_rate[i]),
             'pred_mean_ret':     float(pred_mean_ret[i]),
             'actual_mean_ret':   float(actual_mean_ret[i]),
             'next_day_pred_ret': float(next_day_pred_ret[i]),

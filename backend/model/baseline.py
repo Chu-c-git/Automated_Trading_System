@@ -11,21 +11,25 @@ Test set 切法由外部傳入，確保與 LSTM 使用相同日期區間。
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from statsmodels.tsa.ar_model import AutoReg
 
 
 def _evaluate(y_true: pd.Series, y_pred: pd.Series, name: str,
               actual_mean_ret: float, next_day_pred_ret: float,
               train_r2: float, train_rmse: float) -> dict:
-    r2   = r2_score(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2       = r2_score(y_true, y_pred)
+    rmse     = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae      = mean_absolute_error(y_true, y_pred)
+    hit_rate = float(np.mean(np.sign(y_pred) == np.sign(y_true)))
     return {
         "model":              name,
         "train_r2":           train_r2,
         "train_rmse":         train_rmse,
         "test_r2":            r2,
         "test_rmse":          rmse,
+        "test_mae":           mae,
+        "test_hit_rate":      hit_rate,
         "pred_mean_ret":      float(y_pred.mean()),
         "actual_mean_ret":    actual_mean_ret,
         "next_day_pred_ret":  next_day_pred_ret,
