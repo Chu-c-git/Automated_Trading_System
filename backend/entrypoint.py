@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 POSTGRES_URI: str = os.getenv("POSTGRES_URI", "")
 STOCK_DICT   = json.load(open('/app/data/topk_stocks_by_industries.json', 'r', encoding='utf-8'))
 
-TRAIN_START = '2020-01-01'
+TRAIN_START = '2015-01-01'
 RUN_DATE    = time.strftime('%Y-%m-%d')
 TEST_START  = (pd.Timestamp(RUN_DATE) - pd.DateOffset(months=1)).strftime('%Y-%m-%d')
 

@@ -41,17 +41,24 @@ TAKE_PROFIT_PCT = 5.0  # 停利：漲超過 10%
 STOP_LOSS_PCT   = 5.0  # 停損：跌超過 10%
 
 
-def fetch_current_price(stock_code: str) -> float | None:
-    """取得即時成交價"""
-    try:
-        data = twstock.realtime.get(stock_code)
-        if not data.get('success'):
-            logging.error(f"twstock realtime failed for {stock_code}")
+def fetch_current_price(stock_code: str, retries: int = 3, retry_delay: float = 2.0) -> float | None:
+    """取得即時成交價，若 TWSE API 回傳 '-'（尚無成交）則 retry"""
+    for attempt in range(retries):
+        try:
+            data = twstock.realtime.get(stock_code)
+            if not data.get('success'):
+                logging.error(f"twstock realtime failed for {stock_code}")
+                return None
+            price_str = data['realtime']['latest_trade_price']
+            if price_str and price_str != '-':
+                return float(price_str)
+            if attempt < retries - 1:
+                time.sleep(retry_delay)
+        except Exception as e:
+            logging.error(f"Error fetching price for {stock_code}: {e}")
             return None
-        return float(data['realtime']['latest_trade_price'])
-    except Exception as e:
-        logging.error(f"Error fetching price for {stock_code}: {e}")
-        return None
+    logging.error(f"No trade price available for {stock_code} after {retries} attempts")
+    return None
 
 
 def calc_pnl_pct(current_price: float, cost_price: float) -> float:

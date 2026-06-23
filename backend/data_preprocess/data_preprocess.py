@@ -54,7 +54,7 @@ TARGET_CATEGORIES = [
 INSPECT_CATEGORIES = [
     "ETF", "建材營造", "電子零組件業", "半導體業", "通信網路業",
 ]
-DEFAULT_START_DATE = "20200101"
+DEFAULT_START_DATE = "20100101"
 # =============================================================================
 # Module 1: Generate stock selection JSON
 # =============================================================================
@@ -443,7 +443,7 @@ def download_stock_data_to_db(
 
     incremental_mode = start_date is None
     engine = create_engine(PG_URI)
-    fallback_start = "20200101"
+    fallback_start = DEFAULT_START_DATE
 
     print(f"Mode: {'incremental update' if incremental_mode else 'full download'}")
     print(f"End date: {end_date} | Stocks: {len(stock_codes)}")
