@@ -25,7 +25,7 @@ Attach your IDE to `ats-backend` container to run notebooks and experiments.
 
 ## Structure
 
-![infra](src\infra.png)
+![infra](src/infra.png)
 
 ```
 .
