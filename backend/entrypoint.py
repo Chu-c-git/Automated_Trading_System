@@ -60,8 +60,8 @@ TEST_START  = (pd.Timestamp(RUN_DATE) - pd.DateOffset(months=1)).strftime('%Y-%m
 SEQ_LEN    = 7
 MA_WINDOW  = 5
 AR_LAGS    = 5
-HIDDEN     = 64
-NUM_LAYERS = 3
+HIDDEN     = 16
+NUM_LAYERS = 1
 DROPOUT    = 0.3
 LR         = 0.001
 BATCH_SIZE = 32
@@ -142,8 +142,8 @@ def _lstm_rows(df_raw: pd.DataFrame, category: str, stock_codes: list) -> tuple[
 
 
 def _build_comparison_tables(per_stock: pd.DataFrame):
-    num_cols = ['test_r2', 'test_rmse', 'pred_mean_ret',
-                'actual_mean_ret', 'next_day_pred_ret']
+    num_cols = ['test_r2', 'test_rmse', 'test_mae', 'test_hit_rate',
+                'pred_mean_ret', 'actual_mean_ret', 'next_day_pred_ret']
     per_cat = (
         per_stock
         .groupby(['run_date', 'category', 'model',

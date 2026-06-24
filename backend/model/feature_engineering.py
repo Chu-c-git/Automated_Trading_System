@@ -54,13 +54,19 @@ def build_features(df: pd.DataFrame, train_ratio: float = None,
     rel_close = close_wide.sub(close_wide.mean(axis=1), axis=0)
     rel_close.columns = [f"rel_{c}" for c in close_wide.columns]
 
+    # shift(1) 確保 feature 只用到昨日資訊，避免 target leakage
+    ret_feat   = ret_wide.shift(1).fillna(0.0)
+    close_feat = close_wide.shift(1).ffill()
+    rel_feat   = rel_close.shift(1).ffill()
+    extra_feat = [w.shift(1).ffill() for w in extra_wide_list]
+
     # column order: close | extra... | ret | market | rel
     feature_df = pd.concat(
-        [close_wide] + extra_wide_list + [
-            ret_wide,
-            close_wide.mean(axis=1).to_frame('market_mean_close'),
-            ret_wide.mean(axis=1).to_frame('market_mean_ret'),
-            rel_close,
+        [close_feat] + extra_feat + [
+            ret_feat,
+            close_feat.mean(axis=1).to_frame('market_mean_close'),
+            ret_feat.mean(axis=1).to_frame('market_mean_ret'),
+            rel_feat,
         ],
         axis=1,
     ).dropna()

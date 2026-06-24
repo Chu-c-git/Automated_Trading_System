@@ -49,9 +49,14 @@ def fetch_current_price(stock_code: str, retries: int = 3, retry_delay: float = 
             if not data.get('success'):
                 logging.error(f"twstock realtime failed for {stock_code}")
                 return None
-            price_str = data['realtime']['latest_trade_price']
+            realtime = data['realtime']
+            price_str = realtime['latest_trade_price']
             if price_str and price_str != '-':
                 return float(price_str)
+            bid = realtime['best_bid_price']
+            ask = realtime['best_ask_price']
+            if bid and ask and bid[0] != '-' and ask[0] != '-':
+                return (float(bid[0]) + float(ask[0])) / 2
             if attempt < retries - 1:
                 time.sleep(retry_delay)
         except Exception as e:
